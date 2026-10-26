@@ -1,5 +1,7 @@
 # minic
 
+[![build-and-test](https://github.com/RakshitRPathak/minic/actions/workflows/ci.yml/badge.svg)](https://github.com/RakshitRPathak/minic/actions/workflows/ci.yml)
+
 A small compiler for a tiny imperative language, written in C++17 with no dependencies.
 It goes through the same stages as a production compiler: lexing, parsing, semantic
 analysis, optimization, code generation and execution on a virtual machine.
