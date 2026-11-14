@@ -125,3 +125,7 @@ tests/run_tests.sh build/minic_san
    elimination, and a peephole pass over the bytecode.
 4. Emit a real object format and write a tiny linker that resolves symbols.
 5. Type checking with `int` and `bool`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
