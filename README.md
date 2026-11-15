@@ -4,11 +4,16 @@
 
 A small compiler for a tiny imperative language, written in C++17 with no dependencies.
 It goes through the same stages as a production compiler: lexing, parsing, semantic
-analysis, optimization, code generation and execution on a virtual machine.
+analysis, optimization, code generation and execution on a virtual machine. A second
+back half lowers the program to a three-address **SSA IR** with a control-flow graph
+and runs the classic optimizations on it.
 
 ```
-source ─► tokens ─► AST ─► symbol table ─► optimized AST ─► bytecode ─► VM
-         lexer.hpp  parser.hpp  sema.hpp    optimizer.hpp   codegen.hpp   vm.hpp
+source ─► tokens ─► AST ─► symbol table ─► optimized AST ─┬─► bytecode ─► VM
+         lexer.hpp  parser.hpp  sema.hpp    optimizer.hpp  │   codegen.hpp   vm.hpp
+                                                           │
+                                                           └─► SSA IR ─► optimized IR ─► IR interpreter   (--ir)
+                                                               ir.hpp    iropt.hpp       irvm.hpp
 ```
 
 ## The language
@@ -44,11 +49,14 @@ both return 0.
 cmake -S . -B build && cmake --build build
 build/minic examples/hello.mc               # compile and run
 build/minic prog.mc --disasm --stats        # see the bytecode and optimizer stats
+build/minic prog.mc --dump-ir --no-run      # see the optimized SSA IR
+build/minic prog.mc --ir                    # run through the SSA IR instead of the bytecode
+tests/fuzz.py build/minic 1000              # differential fuzzing (needs python3)
 ctest --test-dir build --output-on-failure  # or: tests/run_tests.sh build/minic
 ```
 
-Options: `--dump-tokens`, `--dump-ast`, `--dump-opt`, `--disasm`, `--no-opt`,
-`--no-run`, `--stats`, `--max-steps N`.
+Options: `--dump-tokens`, `--dump-ast`, `--dump-opt`, `--disasm`, `--ir`, `--dump-ir`,
+`--no-opt`, `--no-run`, `--stats`, `--max-steps N`.
 
 Exit codes: `0` success, `1` compile error, `2` runtime error, `64` bad usage.
 
@@ -63,6 +71,9 @@ Exit codes: `0` success, `1` compile error, `2` runtime error, `64` bad usage.
 | Optimizer | `optimizer.hpp` | Constant folding, dead-branch elimination (`if (0)`), dead-loop elimination (`while (0)`), removal of statements after a `return`. Calls are never folded or removed, because a function can print or write a global. |
 | Code generator | `codegen.hpp` | Emits stack-machine bytecode. Uses **backpatching** for jump targets. Function bodies follow the top-level code; `CALL` names a function-table index, so calls need no patching. |
 | VM | `vm.hpp` | Fetch-decode-execute loop with a value stack and a stack of call frames. Checks for stack underflow, division by zero, runaway loops and runaway recursion (depth limit 10,000). |
+| SSA IR | `ir.hpp` | Three-address code in SSA form over a control-flow graph, built straight from the AST. See [The SSA IR](#the-ssa-ir). |
+| IR optimizer | `iropt.hpp` | Constant propagation, branch folding, phi simplification, global value numbering over the dominator tree, dead code elimination, block merging. |
+| IR interpreter | `irvm.hpp` | Runs the IR, evaluating all phis of a block together on entry. Used to check the IR against the bytecode VM. |
 
 ### Backpatching in one example
 
@@ -101,30 +112,99 @@ problem with labels and relocations.
 * The test suite runs every program twice, with and without `--no-opt`, and requires
   identical output.
 
+## The SSA IR
+
+`ir.hpp` lowers the AST into three-address code in SSA form: basic blocks in a
+control-flow graph, every value assigned once, and phis where paths join. It is built
+directly in SSA with the on-the-fly algorithm of Braun et al. (2013), so no dominance
+frontiers are needed. This is the loop `while (i <= 100) { sum = sum + i; i = i + 1; }`:
+
+```
+main:
+ b0:
+  v0 = const 0
+  v1 = const 1
+  jmp b1
+ b1:    ; from b0 b2
+  v2 = phi [b0: v1], [b2: v7]
+  v3 = phi [b0: v0], [b2: v6]
+  v4 = const 100
+  v5 = le v2, v4
+  br v5, b2, b3
+ b2:    ; from b1
+  v6 = add v3, v2
+  v7 = add v2, v1
+  jmp b1
+ b3:    ; from b1
+  print v3
+  ret v0
+```
+
+Function parameters and `let` variables become SSA values. A global that some function
+reads or writes stays in memory (`load_global` / `store_global`), because a call may
+change it; a global that no function touches is promoted to an SSA value of `main`.
+
+`iropt.hpp` runs these passes to a fixed point:
+
+| Pass | What it does |
+|---|---|
+| Constant propagation and folding | Constants flow through variables and across blocks, which the AST folder cannot do. Includes identities such as `x * 1`, `x + 0`, `x - x`. |
+| Branch folding | A branch on a known condition becomes a jump; blocks nothing reaches any more are deleted. |
+| Phi simplification | A phi whose operands are all the same value is replaced by that value. |
+| Global value numbering | A computation is replaced by an identical earlier one that dominates it (common subexpression elimination). Walks the dominator tree, computed with the Cooper-Harvey-Kennedy algorithm. |
+| Dead code elimination | Removes anything unused that has no effect. |
+| Block merging | Joins a block to its only successor when that successor has no other predecessor. |
+
+Calls, prints, stores to globals and any division that could be a division by zero are
+never removed or reordered, so a program fails in the same place with the same output.
+
+`irvm.hpp` interprets the IR. It is there to check the IR, not to be fast: there is no
+register allocator or machine back end yet.
+
 ## Testing
 
-`tests/run_tests.sh` runs 66 checks:
+`tests/run_tests.sh` runs 119 checks:
 
-* 19 programs (arithmetic, loops, primes, Collatz, GCD, overflow, dead code, functions,
-  recursion, mutual recursion, scoping, return forms...) each executed optimized and
-  unoptimized,
-* 23 error cases checking both the exit code and the exact message with its line number,
+* 20 programs (arithmetic, loops, primes, Collatz, GCD, overflow, dead code, functions,
+  recursion, mutual recursion, scoping, return forms...) each executed four ways:
+  bytecode VM and SSA IR interpreter, optimized and unoptimized,
+* 23 error cases checking both the exit code and the exact message with its line number;
+  the 5 runtime errors are also checked through the IR,
 * assertions that the optimizer really shrinks the bytecode, counts what it removed and
-  never removes a call.
+  never removes a call,
+* assertions about the optimized IR: constants reach a branch and decide it, a repeated
+  `x * x + 1` is computed once, the sum loop has exactly 2 phis.
+
+`tests/fuzz.py` is a differential fuzzer. It generates random valid programs (functions,
+loops, globals, repeated subexpressions, divisions that sometimes fail) and requires the
+same output and exit code from all four modes. CI runs 1,000 programs on every push.
+
+The fuzzer was checked by planting bugs in the IR code by hand and confirming it reports
+each one: deleting a division that could fail, folding `x / x` to 1, treating `-` as
+commutative in value numbering, keeping the wrong side of a folded branch, removing a phi
+whose operands differ, promoting a global that a function writes, and writing a
+block's phis one at a time instead of together. The first version
+of the fuzzer missed the value-numbering bug, because random expressions almost never
+repeat; it now reuses earlier subexpressions on purpose.
 
 The suite also passes under AddressSanitizer and UndefinedBehaviorSanitizer:
 
 ```bash
 g++ -std=c++17 -g -fsanitize=address,undefined src/main.cpp -o build/minic_san
 tests/run_tests.sh build/minic_san
+tests/fuzz.py build/minic_san 300
 ```
 
 ## Design notes and limitations
 
 * **Stack VM, not register VM.** A stack machine is simpler to generate code for.
   NVIDIA's PTX is register based (unlimited virtual registers that `ptxas` allocates
-  to real ones), so a natural next step is a register-based back end with a
-  register allocator.
+  to real ones). The SSA IR is the first half of that: it has unlimited virtual
+  registers too, but it is only interpreted. Lowering it out of SSA and allocating
+  registers is the next step.
+* **The IR optimizer is deliberately small.** No loop-invariant code motion, no
+  inlining, no reasoning about memory (two loads of the same global are not merged),
+  and constant propagation is not conditional (SCCP would find more).
 * **Flat scope.** One global scope plus one scope per function; blocks do not open new
   scopes. `let` inside a loop re-initializes
   the variable each iteration. Per-block scopes are a good extension.
@@ -137,9 +217,10 @@ tests/run_tests.sh build/minic_san
 
 ## Ideas to extend it
 
-1. A register-based IR (three-address code) plus a linear-scan register allocator.
-2. More optimizations: algebraic simplification (`x * 1`), common subexpression
-   elimination, and a peephole pass over the bytecode.
+1. Lower the IR out of SSA (phi elimination with parallel copies), then a linear-scan
+   register allocator and a register-machine or x86-64 back end.
+2. More IR passes: loop-invariant code motion, sparse conditional constant propagation,
+   inlining, redundant-load elimination.
 3. Emit a real object format and write a tiny linker that resolves symbols.
 4. Type checking with `int` and `bool`.
 
