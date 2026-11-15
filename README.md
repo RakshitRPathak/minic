@@ -20,11 +20,23 @@ print x;                          // output
 if (x > 5) { print 1; } else { print 0; }
 while (x > 0) { x = x - 1; }
 // comments run to end of line
+
+fn fact(n) {                      // functions: parameters, locals, recursion
+    if (n <= 1) { return 1; }
+    return n * fact(n - 1);
+}
+print fact(10);                   // a call is an expression...
+fact(3);                          // ...or a statement (result discarded)
 ```
 
 Types: 64-bit signed integers only. Operators: `+ - * /`, unary `-`, and
 `< > <= >= == !=` (which yield 1 or 0). A condition is true when non-zero.
 Integer arithmetic wraps on overflow; division truncates toward zero.
+
+Functions are declared at the top level with `fn` and can be called before their
+definition, so mutual recursion works. A function sees its own parameters and `let`
+variables first, then any global declared above it. `return;` and falling off the end
+both return 0.
 
 ## Build and run
 
@@ -47,10 +59,10 @@ Exit codes: `0` success, `1` compile error, `2` runtime error, `64` bad usage.
 | Lexer | `lexer.hpp` | Hand-written scanner. Looks one character ahead to tell `<` from `<=`. Rejects integer literals that overflow. |
 | Parser | `parser.hpp` | Recursive descent, one function per precedence level. Tighter-binding operators sit deeper in the call chain, which is what makes `2 + 3 * 4` parse correctly. |
 | AST | `ast.hpp` | Tree of nodes owned by `std::unique_ptr`, so memory is freed automatically. |
-| Sema | `sema.hpp` | Checks every variable is declared before use and assigns each one a numbered slot. Runs *before* the optimizer so deleting dead code can never change which programs are accepted. |
-| Optimizer | `optimizer.hpp` | Constant folding, dead-branch elimination (`if (0)`), dead-loop elimination (`while (0)`). |
-| Code generator | `codegen.hpp` | Emits stack-machine bytecode. Uses **backpatching** for jump targets. |
-| VM | `vm.hpp` | Fetch-decode-execute loop with a value stack. Checks for stack underflow, division by zero and runaway loops. |
+| Sema | `sema.hpp` | Checks every variable and function is declared, checks call arity, and resolves each variable to a global slot or a slot in its function's frame. Runs *before* the optimizer so deleting dead code can never change which programs are accepted. |
+| Optimizer | `optimizer.hpp` | Constant folding, dead-branch elimination (`if (0)`), dead-loop elimination (`while (0)`), removal of statements after a `return`. Calls are never folded or removed, because a function can print or write a global. |
+| Code generator | `codegen.hpp` | Emits stack-machine bytecode. Uses **backpatching** for jump targets. Function bodies follow the top-level code; `CALL` names a function-table index, so calls need no patching. |
+| VM | `vm.hpp` | Fetch-decode-execute loop with a value stack and a stack of call frames. Checks for stack underflow, division by zero, runaway loops and runaway recursion (depth limit 10,000). |
 
 ### Backpatching in one example
 
@@ -91,12 +103,14 @@ problem with labels and relocations.
 
 ## Testing
 
-`tests/run_tests.sh` runs 43 checks:
+`tests/run_tests.sh` runs 66 checks:
 
-* 14 programs (arithmetic, loops, primes, Collatz, GCD, overflow, dead code...)
-  each executed optimized and unoptimized,
-* 12 error cases checking both the exit code and the exact message with its line number,
-* assertions that the optimizer really shrinks the bytecode and counts what it removed.
+* 19 programs (arithmetic, loops, primes, Collatz, GCD, overflow, dead code, functions,
+  recursion, mutual recursion, scoping, return forms...) each executed optimized and
+  unoptimized,
+* 23 error cases checking both the exit code and the exact message with its line number,
+* assertions that the optimizer really shrinks the bytecode, counts what it removed and
+  never removes a call.
 
 The suite also passes under AddressSanitizer and UndefinedBehaviorSanitizer:
 
@@ -111,20 +125,23 @@ tests/run_tests.sh build/minic_san
   NVIDIA's PTX is register based (unlimited virtual registers that `ptxas` allocates
   to real ones), so a natural next step is a register-based back end with a
   register allocator.
-* **Flat scope.** One scope for the whole program; `let` inside a loop re-initializes
+* **Flat scope.** One global scope plus one scope per function; blocks do not open new
+  scopes. `let` inside a loop re-initializes
   the variable each iteration. Per-block scopes are a good extension.
 * **Uninitialised reads are 0.** A variable whose declaration was never executed
   (for example inside a skipped `if`) reads as 0.
-* No functions, strings or arrays yet.
+* **Calls.** Arguments are evaluated left to right and passed by value. Each call gets a
+  fresh frame, so recursion works; functions are not values and cannot be nested.
+  Functions and variables have separate namespaces.
+* No strings or arrays yet.
 
 ## Ideas to extend it
 
-1. Functions with a call stack and local variables.
-2. A register-based IR (three-address code) plus a linear-scan register allocator.
-3. More optimizations: algebraic simplification (`x * 1`), common subexpression
+1. A register-based IR (three-address code) plus a linear-scan register allocator.
+2. More optimizations: algebraic simplification (`x * 1`), common subexpression
    elimination, and a peephole pass over the bytecode.
-4. Emit a real object format and write a tiny linker that resolves symbols.
-5. Type checking with `int` and `bool`.
+3. Emit a real object format and write a tiny linker that resolves symbols.
+4. Type checking with `int` and `bool`.
 
 ## License
 

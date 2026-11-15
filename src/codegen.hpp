@@ -12,6 +12,11 @@
 //     (end)               <- second JMP gets patched to point here
 //
 // Assemblers and linkers solve the same problem with labels and relocations.
+//
+// Layout: the top-level statements come first and end in HALT; function bodies
+// follow. A call pushes its arguments left to right and emits CALL <index>; the
+// VM looks the entry address up in the function table, so calls need no patching.
+// Every function body ends in `PUSH 0; RET`, so falling off the end returns 0.
 #pragma once
 
 #include "ast.hpp"
@@ -29,6 +34,8 @@ public:
         out_.vars = syms_.names;
         stmt(prog);
         emit(Op::Halt);
+        for (const auto& s : prog.stmts)
+            if (s->kind == StmtKind::Fn) function(static_cast<const FnDecl&>(*s));
         return std::move(out_);
     }
 
@@ -45,16 +52,35 @@ private:
 
     void patch(size_t at, size_t target) { out_.code[at].arg = static_cast<int64_t>(target); }
 
-    int64_t slotOf(const std::string& name) const { return syms_.slot.at(name); }
+    void function(const FnDecl& f) {
+        // Sema numbered the functions in source order, which is the order we emit them in.
+        FuncInfo info;
+        info.name = f.name;
+        info.entry = here();
+        info.nparams = static_cast<int>(f.params.size());
+        info.locals = f.localNames;
+        out_.funcs.push_back(std::move(info));
+        stmt(*f.body);
+        emit(Op::Push, 0);
+        emit(Op::Ret);
+    }
 
     void expr(const Expr& e) {
         switch (e.kind) {
             case ExprKind::Number:
                 emit(Op::Push, static_cast<const NumberExpr&>(e).value);
                 break;
-            case ExprKind::Var:
-                emit(Op::Load, slotOf(static_cast<const VarExpr&>(e).name));
+            case ExprKind::Var: {
+                const auto& v = static_cast<const VarExpr&>(e);
+                emit(v.local ? Op::LoadLocal : Op::Load, v.slot);
                 break;
+            }
+            case ExprKind::Call: {
+                const auto& c = static_cast<const CallExpr&>(e);
+                for (const auto& a : c.args) expr(*a);
+                emit(Op::Call, c.fnIndex);
+                break;
+            }
             case ExprKind::Unary:
                 expr(*static_cast<const UnaryExpr&>(e).operand);
                 emit(Op::Neg);
@@ -74,13 +100,13 @@ private:
             case StmtKind::Let: {
                 const auto& n = static_cast<const LetStmt&>(s);
                 expr(*n.init);
-                emit(Op::Store, slotOf(n.name));
+                emit(n.local ? Op::StoreLocal : Op::Store, n.slot);
                 break;
             }
             case StmtKind::Assign: {
                 const auto& n = static_cast<const AssignStmt&>(s);
                 expr(*n.value);
-                emit(Op::Store, slotOf(n.name));
+                emit(n.local ? Op::StoreLocal : Op::Store, n.slot);
                 break;
             }
             case StmtKind::Print:
@@ -115,6 +141,19 @@ private:
                 patch(exitJump, here());
                 break;
             }
+            case StmtKind::Fn:
+                break;  // emitted after the top-level code, see generate()
+            case StmtKind::Return: {
+                const auto& n = static_cast<const ReturnStmt&>(s);
+                if (n.value) expr(*n.value);
+                else emit(Op::Push, 0);
+                emit(Op::Ret);
+                break;
+            }
+            case StmtKind::ExprStmt:
+                expr(*static_cast<const ExprStmt&>(s).expr);
+                emit(Op::Pop);
+                break;
         }
     }
 };

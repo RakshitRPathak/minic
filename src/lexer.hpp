@@ -22,11 +22,11 @@ struct CompileError : std::runtime_error {
 
 enum class Tok {
     Number, Ident,
-    Let, Print, If, Else, While,
+    Let, Print, If, Else, While, Fn, Return,
     Plus, Minus, Star, Slash,
     Lt, Gt, Le, Ge, EqEq, Ne,
     Assign,
-    LParen, RParen, LBrace, RBrace, Semi,
+    LParen, RParen, LBrace, RBrace, Semi, Comma,
     End
 };
 
@@ -46,6 +46,8 @@ inline const char* tokName(Tok t) {
         case Tok::If:     return "'if'";
         case Tok::Else:   return "'else'";
         case Tok::While:  return "'while'";
+        case Tok::Fn:     return "'fn'";
+        case Tok::Return: return "'return'";
         case Tok::Plus:   return "'+'";
         case Tok::Minus:  return "'-'";
         case Tok::Star:   return "'*'";
@@ -62,6 +64,7 @@ inline const char* tokName(Tok t) {
         case Tok::LBrace: return "'{'";
         case Tok::RBrace: return "'}'";
         case Tok::Semi:   return "';'";
+        case Tok::Comma:  return "','";
         case Tok::End:    return "end of input";
     }
     return "?";
@@ -131,6 +134,7 @@ private:
             case '{': return make(Tok::LBrace, "{");
             case '}': return make(Tok::RBrace, "}");
             case ';': return make(Tok::Semi, ";");
+            case ',': return make(Tok::Comma, ",");
             // Two-character operators: peek one more character to decide.
             case '<':
                 if (peek() == '=') { ++pos_; return make(Tok::Le, "<="); }
@@ -175,6 +179,8 @@ private:
         else if (word == "if") type = Tok::If;
         else if (word == "else") type = Tok::Else;
         else if (word == "while") type = Tok::While;
+        else if (word == "fn") type = Tok::Fn;
+        else if (word == "return") type = Tok::Return;
         return make(type, word);
     }
 };
