@@ -16,7 +16,7 @@
 namespace minic {
 
 // ---------------------------------------------------------------- expressions
-enum class ExprKind { Number, Var, Unary, Binary };
+enum class ExprKind { Number, Var, Unary, Binary, Call };
 
 struct Expr {
     ExprKind kind;
@@ -33,8 +33,12 @@ struct NumberExpr : Expr {
     NumberExpr(int64_t v, int l) : Expr(ExprKind::Number, l), value(v) {}
 };
 
+// Sema resolves every variable reference to a numbered slot: either a global
+// slot or a slot in the enclosing function's frame (`local`).
 struct VarExpr : Expr {
     std::string name;
+    int slot = -1;
+    bool local = false;
     VarExpr(std::string n, int l) : Expr(ExprKind::Var, l), name(std::move(n)) {}
 };
 
@@ -50,8 +54,16 @@ struct BinaryExpr : Expr {
         : Expr(ExprKind::Binary, l), op(o), lhs(std::move(a)), rhs(std::move(b)) {}
 };
 
+struct CallExpr : Expr {
+    std::string name;
+    std::vector<ExprPtr> args;
+    int fnIndex = -1;  // filled in by sema
+    CallExpr(std::string n, std::vector<ExprPtr> a, int l)
+        : Expr(ExprKind::Call, l), name(std::move(n)), args(std::move(a)) {}
+};
+
 // ----------------------------------------------------------------- statements
-enum class StmtKind { Let, Assign, Print, If, While, Block };
+enum class StmtKind { Let, Assign, Print, If, While, Block, Fn, Return, ExprStmt };
 
 struct Stmt {
     StmtKind kind;
@@ -66,6 +78,8 @@ using StmtPtr = std::unique_ptr<Stmt>;
 struct LetStmt : Stmt {
     std::string name;
     ExprPtr init;
+    int slot = -1;       // filled in by sema, like VarExpr
+    bool local = false;
     LetStmt(std::string n, ExprPtr e, int l)
         : Stmt(StmtKind::Let, l), name(std::move(n)), init(std::move(e)) {}
 };
@@ -73,6 +87,8 @@ struct LetStmt : Stmt {
 struct AssignStmt : Stmt {
     std::string name;
     ExprPtr value;
+    int slot = -1;
+    bool local = false;
     AssignStmt(std::string n, ExprPtr e, int l)
         : Stmt(StmtKind::Assign, l), name(std::move(n)), value(std::move(e)) {}
 };
@@ -101,6 +117,28 @@ struct WhileStmt : Stmt {
     StmtPtr body;
     WhileStmt(ExprPtr c, StmtPtr b, int l)
         : Stmt(StmtKind::While, l), cond(std::move(c)), body(std::move(b)) {}
+};
+
+// `fn name(a, b) { ... }`. Only allowed at the top level of a program.
+struct FnDecl : Stmt {
+    std::string name;
+    std::vector<std::string> params;
+    std::unique_ptr<BlockStmt> body;
+    int index = -1;                       // position in the function table (sema)
+    std::vector<std::string> localNames;  // frame slot -> name; parameters come first (sema)
+    FnDecl(std::string n, std::vector<std::string> p, std::unique_ptr<BlockStmt> b, int l)
+        : Stmt(StmtKind::Fn, l), name(std::move(n)), params(std::move(p)), body(std::move(b)) {}
+};
+
+struct ReturnStmt : Stmt {
+    ExprPtr value;  // may be null: `return;` returns 0
+    ReturnStmt(ExprPtr e, int l) : Stmt(StmtKind::Return, l), value(std::move(e)) {}
+};
+
+// A call used as a statement: `f(1, 2);`. The result is discarded.
+struct ExprStmt : Stmt {
+    ExprPtr expr;
+    ExprStmt(ExprPtr e, int l) : Stmt(StmtKind::ExprStmt, l), expr(std::move(e)) {}
 };
 
 // A whole program is just a top-level block.
@@ -135,6 +173,12 @@ inline std::string dumpExpr(const Expr& e) {
             const auto& b = static_cast<const BinaryExpr&>(e);
             return std::string("(") + opText(b.op) + " " + dumpExpr(*b.lhs) + " " +
                    dumpExpr(*b.rhs) + ")";
+        }
+        case ExprKind::Call: {
+            const auto& c = static_cast<const CallExpr&>(e);
+            std::string out = "(call " + c.name;
+            for (const auto& a : c.args) out += " " + dumpExpr(*a);
+            return out + ")";
         }
     }
     return "?";
@@ -171,6 +215,18 @@ inline std::string dumpStmt(const Stmt& s, int depth = 0) {
             return pad + "(while " + dumpExpr(*n.cond) + "\n" + dumpStmt(*n.body, depth + 1) +
                    pad + ")\n";
         }
+        case StmtKind::Fn: {
+            const auto& n = static_cast<const FnDecl&>(s);
+            std::string out = pad + "(fn " + n.name + " (";
+            for (size_t i = 0; i < n.params.size(); ++i) out += (i ? " " : "") + n.params[i];
+            return out + ")\n" + dumpStmt(*n.body, depth + 1) + pad + ")\n";
+        }
+        case StmtKind::Return: {
+            const auto& n = static_cast<const ReturnStmt&>(s);
+            return pad + "(return" + (n.value ? " " + dumpExpr(*n.value) : std::string()) + ")\n";
+        }
+        case StmtKind::ExprStmt:
+            return pad + "(expr " + dumpExpr(*static_cast<const ExprStmt&>(s).expr) + ")\n";
     }
     return "";
 }

@@ -100,14 +100,17 @@ int main(int argc, char** argv) {
         if (stats && optimize)
             std::cerr << "[opt] folded expressions: " << optStats.foldedExprs
                       << ", dead branches: " << optStats.deadBranches
-                      << ", dead loops: " << optStats.deadLoops << "\n";
+                      << ", dead loops: " << optStats.deadLoops
+                      << ", unreachable statements: " << optStats.unreachableStmts << "\n";
         if (stats) std::cerr << "[codegen] instructions: " << bytecode.code.size() << "\n";
 
         // Stage 6: execution
         if (run) {
             std::cout.flush();
             minic::VMStats vm = minic::runVM(bytecode, std::cout, maxSteps);
-            if (stats) std::cerr << "[vm] steps executed: " << vm.steps << "\n";
+            if (stats)
+                std::cerr << "[vm] steps executed: " << vm.steps << ", calls: " << vm.calls
+                          << ", max call depth: " << vm.maxDepth << "\n";
         }
     } catch (const minic::CompileError& e) {
         std::cout.flush();

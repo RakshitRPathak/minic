@@ -2,9 +2,12 @@
 //
 // Grammar (lowest precedence at the top, one function per level):
 //
-//   program    := statement* END
+//   program    := ( function | statement )* END
+//   function   := "fn" IDENT "(" ( IDENT ( "," IDENT )* )? ")" "{" statement* "}"
 //   statement  := "let" IDENT "=" expr ";"
 //               | IDENT "=" expr ";"
+//               | IDENT "(" args ")" ";"
+//               | "return" expr? ";"
 //               | "print" expr ";"
 //               | "if" "(" expr ")" statement ( "else" statement )?
 //               | "while" "(" expr ")" statement
@@ -15,7 +18,8 @@
 //   term       := factor ( ("+" | "-") factor )*
 //   factor     := unary ( ("*" | "/") unary )*
 //   unary      := "-" unary | primary
-//   primary    := NUMBER | IDENT | "(" expr ")"
+//   primary    := NUMBER | IDENT | IDENT "(" args ")" | "(" expr ")"
+//   args       := ( expr ( "," expr )* )?
 //
 // Why this gives the right precedence: `term` calls `factor` for each operand,
 // so for 2 + 3 * 4 the `3 * 4` is grouped by `factor` *before* `term` ever sees
@@ -36,7 +40,8 @@ public:
 
     std::unique_ptr<Program> parseProgram() {
         auto prog = std::make_unique<Program>(1);
-        while (peek().type != Tok::End) prog->stmts.push_back(statement());
+        while (peek().type != Tok::End)
+            prog->stmts.push_back(peek().type == Tok::Fn ? function() : statement());
         return prog;
     }
 
@@ -75,13 +80,50 @@ private:
             case Tok::If:     return ifStatement();
             case Tok::While:  return whileStatement();
             case Tok::LBrace: return block();
+            case Tok::Return: return returnStatement();
+            case Tok::Fn:
+                throw CompileError(t.line, "functions can only be declared at the top level");
             case Tok::Ident:
                 if (peek(1).type == Tok::Assign) return assignStatement();
+                if (peek(1).type == Tok::LParen) return callStatement();
                 break;
             default: break;
         }
         throw CompileError(t.line, std::string("unexpected ") + tokName(t.type) +
                                        " at start of statement");
+    }
+
+    StmtPtr function() {
+        int line = advance().line;  // 'fn'
+        std::string name = expect(Tok::Ident, "after 'fn'").text;
+        expect(Tok::LParen, "after function name");
+        std::vector<std::string> params;
+        if (peek().type != Tok::RParen) {
+            do params.push_back(expect(Tok::Ident, "as parameter name").text);
+            while (match(Tok::Comma));
+        }
+        expect(Tok::RParen, "after parameters");
+        if (peek().type != Tok::LBrace)
+            throw CompileError(peek().line, std::string("expected '{' to start function body, found ") +
+                                                tokName(peek().type));
+        StmtPtr body = block();
+        std::unique_ptr<BlockStmt> blk(static_cast<BlockStmt*>(body.release()));
+        return std::make_unique<FnDecl>(std::move(name), std::move(params), std::move(blk), line);
+    }
+
+    StmtPtr returnStatement() {
+        int line = advance().line;  // 'return'
+        ExprPtr value;
+        if (peek().type != Tok::Semi) value = expression();
+        expect(Tok::Semi, "after return value");
+        return std::make_unique<ReturnStmt>(std::move(value), line);
+    }
+
+    StmtPtr callStatement() {
+        int line = peek().line;
+        ExprPtr call = primary();  // IDENT "(" args ")"
+        expect(Tok::Semi, "after call");
+        return std::make_unique<ExprStmt>(std::move(call), line);
     }
 
     StmtPtr letStatement() {
@@ -181,7 +223,14 @@ private:
             }
             case Tok::Ident: {
                 advance();
-                return std::make_unique<VarExpr>(t.text, t.line);
+                if (!match(Tok::LParen)) return std::make_unique<VarExpr>(t.text, t.line);
+                std::vector<ExprPtr> args;
+                if (peek().type != Tok::RParen) {
+                    do args.push_back(expression());
+                    while (match(Tok::Comma));
+                }
+                expect(Tok::RParen, "to close argument list");
+                return std::make_unique<CallExpr>(t.text, std::move(args), t.line);
             }
             case Tok::LParen: {
                 advance();

@@ -18,14 +18,19 @@ namespace minic {
 
 enum class Op : uint8_t {
     Push,        // push <arg>
-    Load,        // push variable slot <arg>
-    Store,       // pop into variable slot <arg>
+    Load,        // push global variable slot <arg>
+    Store,       // pop into global variable slot <arg>
+    LoadLocal,   // push slot <arg> of the current call frame
+    StoreLocal,  // pop into slot <arg> of the current call frame
     Add, Sub, Mul, Div,
     Neg,
     Lt, Gt, Le, Ge, Eq, Ne,   // push 1 or 0
     Jmp,         // pc = <arg>
     JmpIfFalse,  // pop; if it was 0, pc = <arg>
     Print,       // pop and print
+    Pop,         // discard the top of the stack (a call used as a statement)
+    Call,        // call function <arg> (index into the function table); arguments are on the stack
+    Ret,         // pop the return value, drop the frame, push the value for the caller
     Halt
 };
 
@@ -34,9 +39,19 @@ struct Instr {
     int64_t arg = 0;
 };
 
+// One entry per function. CALL refers to a function by its index here, so the
+// code generator never has to backpatch a call to a function it has not emitted yet.
+struct FuncInfo {
+    std::string name;
+    size_t entry = 0;                 // index of the first instruction
+    int nparams = 0;
+    std::vector<std::string> locals;  // frame slot -> name; parameters come first
+};
+
 struct BytecodeProgram {
     std::vector<Instr> code;
     std::vector<std::string> vars;  // slot index -> variable name (for the disassembler)
+    std::vector<FuncInfo> funcs;
 };
 
 inline const char* opName(Op op) {
@@ -58,6 +73,11 @@ inline const char* opName(Op op) {
         case Op::Jmp: return "JMP";
         case Op::JmpIfFalse: return "JMP_IF_FALSE";
         case Op::Print: return "PRINT";
+        case Op::LoadLocal: return "LOAD_LOCAL";
+        case Op::StoreLocal: return "STORE_LOCAL";
+        case Op::Pop: return "POP";
+        case Op::Call: return "CALL";
+        case Op::Ret: return "RET";
         case Op::Halt: return "HALT";
     }
     return "?";
@@ -65,7 +85,7 @@ inline const char* opName(Op op) {
 
 inline bool hasOperand(Op op) {
     return op == Op::Push || op == Op::Load || op == Op::Store || op == Op::Jmp ||
-           op == Op::JmpIfFalse;
+           op == Op::JmpIfFalse || op == Op::LoadLocal || op == Op::StoreLocal || op == Op::Call;
 }
 
 // Map a binary-operator token to its opcode.
@@ -118,14 +138,26 @@ inline bool evalBinary(Op op, int64_t a, int64_t b, int64_t& out) {
 
 inline std::string disassemble(const BytecodeProgram& p) {
     std::ostringstream os;
+    const FuncInfo* cur = nullptr;  // function whose body we are inside, if any
     for (size_t i = 0; i < p.code.size(); ++i) {
         const Instr& in = p.code[i];
+        for (const FuncInfo& f : p.funcs)
+            if (f.entry == i) {
+                cur = &f;
+                os << "\n" << f.name << ":    ; " << f.nparams << " parameter(s), " << f.locals.size()
+                   << " frame slot(s)\n";
+            }
         os << (i < 10 ? "  " : i < 100 ? " " : "") << i << "  " << opName(in.op);
         if (hasOperand(in.op)) {
             os << ' ' << in.arg;
             if ((in.op == Op::Load || in.op == Op::Store) && in.arg >= 0 &&
                 static_cast<size_t>(in.arg) < p.vars.size())
                 os << "    ; " << p.vars[static_cast<size_t>(in.arg)];
+            if ((in.op == Op::LoadLocal || in.op == Op::StoreLocal) && cur && in.arg >= 0 &&
+                static_cast<size_t>(in.arg) < cur->locals.size())
+                os << "    ; " << cur->locals[static_cast<size_t>(in.arg)];
+            if (in.op == Op::Call && in.arg >= 0 && static_cast<size_t>(in.arg) < p.funcs.size())
+                os << "    ; " << p.funcs[static_cast<size_t>(in.arg)].name;
         }
         os << '\n';
     }

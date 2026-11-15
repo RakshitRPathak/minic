@@ -3,6 +3,9 @@
 //   1. Constant folding:  2 * 3 + x      ->  6 + x
 //   2. Dead-branch elimination:  if (0) {...} else {...}  ->  the else block
 //   3. Dead-loop elimination:    while (0) {...}          ->  nothing
+//   4. Unreachable code:  statements after a `return` in the same block
+//
+// Calls are never folded or removed: a function may print or change a global.
 //
 // Folding never evaluates a division by zero: `1 / 0` is left alone so the
 // program still fails at run time exactly as the unoptimized program does.
@@ -21,6 +24,7 @@ struct OptStats {
     int foldedExprs = 0;
     int deadBranches = 0;
     int deadLoops = 0;
+    int unreachableStmts = 0;
 };
 
 class Optimizer {
@@ -66,6 +70,11 @@ private:
                 }
                 return e;
             }
+            case ExprKind::Call: {
+                auto& c = static_cast<CallExpr&>(*e);
+                for (auto& a : c.args) a = fold(std::move(a));
+                return e;
+            }
         }
         return e;
     }
@@ -79,9 +88,15 @@ private:
     void optimizeChildren(BlockStmt& blk) {
         std::vector<StmtPtr> kept;
         kept.reserve(blk.stmts.size());
-        for (auto& s : blk.stmts) {
-            StmtPtr o = optimize(std::move(s));
-            if (!isEmptyBlock(o)) kept.push_back(std::move(o));
+        for (size_t i = 0; i < blk.stmts.size(); ++i) {
+            StmtPtr o = optimize(std::move(blk.stmts[i]));
+            if (isEmptyBlock(o)) continue;
+            const bool isReturn = o->kind == StmtKind::Return;
+            kept.push_back(std::move(o));
+            if (isReturn) {  // nothing after a return in the same block can run
+                stats_.unreachableStmts += static_cast<int>(blk.stmts.size() - i - 1);
+                break;
+            }
         }
         blk.stmts = std::move(kept);
     }
@@ -127,6 +142,19 @@ private:
                     ++stats_.deadLoops;
                     return emptyBlock(n.line);
                 }
+                return s;
+            }
+            case StmtKind::Fn:
+                optimizeChildren(*static_cast<FnDecl&>(*s).body);
+                return s;
+            case StmtKind::Return: {
+                auto& n = static_cast<ReturnStmt&>(*s);
+                if (n.value) n.value = fold(std::move(n.value));
+                return s;
+            }
+            case StmtKind::ExprStmt: {
+                auto& n = static_cast<ExprStmt&>(*s);
+                n.expr = fold(std::move(n.expr));
                 return s;
             }
         }

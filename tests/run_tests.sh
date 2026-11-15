@@ -57,6 +57,15 @@ stats="$("$MINIC" "$DIR/programs/dead_code.mc" --no-run --stats 2>&1)"
 if [[ "$stats" == *"dead branches: 5"* && "$stats" == *"dead loops: 1"* ]]; then ok "dead_code stats (5 branches, 1 loop)"
 else bad "dead_code stats" "$stats"; fi
 
+stats="$("$MINIC" "$DIR/programs/returns.mc" --no-run --stats 2>&1)"
+if [[ "$stats" == *"unreachable statements: 1"* ]]; then ok "code after return is removed (1 statement)"
+else bad "code after return is removed" "$stats"; fi
+
+# A call must survive optimization even when its result is multiplied by 0.
+asm="$("$MINIC" "$DIR/programs/returns.mc" --no-run --disasm)"
+if [[ "$asm" == *"; side_effect_kept"* ]]; then ok "calls are not folded away"
+else bad "calls are not folded away"; fi
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]
